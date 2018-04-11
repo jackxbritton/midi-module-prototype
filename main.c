@@ -15,14 +15,98 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <assert.h>
 
 // 8 MHz / 44.1 ksps.
 // See /usr/local/stmdev/include/init486.h for examples.
 #define FS_44K1 1814
 
-extern FlagStatus KeyPressed;   // Use to detect button presses
+typedef struct {
+    float *buffer;
+    int blocksize;
+} NoteContext;
 
-float *notes;
+typedef struct {
+    int half_steps, // From C.
+        octave;     // From A1 = 55Hz.
+} Note;
+
+int note_context_init(NoteContext *nc, int blocksize) {
+
+    int i, j;
+
+    nc->buffer = malloc(12*blocksize*sizeof(float));
+    if (nc->buffer == NULL) return 0;
+
+    for (i = 0; i < 12; i++) {
+        for (j = 0; j < blocksize; j++) {
+
+            // Let A be 55 Hz (A1).
+            // A is index 9.
+            // https://pages.mtu.edu/~suits/NoteFreqCalcs.html
+            // sin(w*t) = sin(2*pi*f*t) = sin(2*pi*f*n*ts) = sin(2*pi*f*n/fs)
+
+            const float a = powf(2.0f, 1.0f/12);
+
+            nc->buffer[i*blocksize + j] = sinf(2.0f*M_PI * j/44.1e3f * 1660.0f*powf(a, i - 9));
+
+            nc->buffer[i*blocksize + j] += 1.0f; // TODO What's the desirable voltage range here?
+
+        }
+    }
+
+    nc->blocksize = blocksize;
+
+    return 1;
+}
+
+void note_context_destroy(NoteContext *nc) {
+    free(nc->buffer);
+}
+
+void note_context_sample_note(const NoteContext *nc, const Note *note, float *out) {
+
+    assert(note->half_steps >= 0 && note->half_steps < 12);
+
+    const float sampling_factor = powf(2.0f, note->octave);
+    int i;
+
+    for (i = 0; i < nc->blocksize; i++) {
+        out[i] = nc->buffer[note->half_steps*nc->blocksize + ((int) (i*sampling_factor) % nc->blocksize)];
+    }
+
+}
+
+void note_context_sample_notes(const NoteContext *nc, const Note *notes, int notes_len, float *out) {
+
+    //const float sampling_factor = powf(2.0f, note->octave);
+
+    float sampling_factor;
+    int i, j;
+
+    // Zero the buffer.
+    for (i = 0; i < nc->blocksize; i++) out[i] = 0.0f;
+
+    // For each note..
+    for (i = 0; i < notes_len; i++) {
+
+        assert(notes[i].half_steps >= 0 && notes[i].half_steps < 12);
+
+        sampling_factor = powf(2.0f, notes[i].octave);
+
+        // Generate the sample..
+        for (j = 0; j < nc->blocksize; j++) {
+            out[i] += nc->buffer[notes[i].half_steps*nc->blocksize + ((int) (i*sampling_factor) % nc->blocksize)];
+        }
+
+    }
+
+    // Normalize the magnitude.
+    for (i = 0; i < nc->blocksize; i++) out[i] /= notes_len;
+
+}
+
+extern FlagStatus KeyPressed;   // Use to detect button presses
 
 int main(void) {
 
@@ -32,12 +116,64 @@ int main(void) {
     float *input,
           *output1,
           *output2;
-    int button_count = 0;
-    int i, j;
+
     int state = 0;
-    int first,
-        third,
-        fifth;
+    int i;
+    int block_count = 0;
+
+    NoteContext nc;
+
+    //const int scale_diatonic[7] = {
+    //    0, 2, 4, 5, 7, 9, 11
+    //};
+
+    const Note notes[32] = {
+        { 0,-5 },
+        {10, 1 },
+        { 0,-5 },
+        {10, 1 },
+        { 4, 0 },
+        { 4, 0 },
+        {10,-3 },
+        { 2,-2 },
+
+        { 0,-5 },
+        { 2, 1 },
+        { 4, 0 },
+        { 2, 5 },
+        { 2,-2 },
+        { 0,-5 },
+        { 2, 1 },
+        { 4, 0 },
+
+        { 3,-5 },
+        { 7, 0 },
+        { 5, 5 },
+        { 5,-2 },
+        { 5, 1 },
+        { 3,-5 },
+        { 5, 1 },
+        { 7, 0 },
+
+        {11,-6 },
+        { 1, 1 },
+        {11,-6 },
+        { 1, 1 },
+        { 3, 8 },
+        { 3, 8 },
+        { 1, 5 },
+        { 1,-2 }
+    };
+
+    const Note chords[8][3] = {
+        { { 0,-5 }, { 3,-5 }, { 7,-5 } },
+        { { 0,-5 }, { 3,-5 }, { 7,-5 } },
+        { { 2, 1 }, { 6, 1 }, { 9, 1 } },
+        { { 2, 1 }, { 6, 1 }, { 9, 1 } },
+        { { 4, 0 }, { 7, 0 }, {11, 0 } },
+        { { 2, 5 }, { 6, 5 }, { 9, 5 } },
+        { { 2,-2 }, { 6,-2 }, { 9,-2 } }
+    };
 
     initialize_ece486(FS_44K1, MONO_IN, STEREO_OUT, MSI_INTERNAL_RC);
 
@@ -46,36 +182,15 @@ int main(void) {
     input   = malloc(blocksize * sizeof(float));
     output1 = malloc(blocksize * sizeof(float));
     output2 = malloc(blocksize * sizeof(float));
-    notes   = malloc(12*blocksize*sizeof(float));
 
     if (input   == NULL ||
         output1 == NULL ||
-        output2 == NULL ||
-        notes   == NULL) {
+        output2 == NULL) {
         flagerror(MEMORY_ALLOCATION_ERROR);
         while(1);
     }
 
-    // Initialize the notes array.
-
-    for (i = 0; i < 12; i++) {
-        for (j = 0; j < blocksize; j++) {
-
-            // Let A4 be 440 Hz.
-            // A4 is index 9.
-            // https://pages.mtu.edu/~suits/NoteFreqCalcs.html
-            // sin(w*t) = sin(2*pi*f*t) = sin(2*pi*f*n*ts) = sin(2*pi*f*n/fs)
-
-            static const float a = powf(2.0f, 1.0f/12);
-
-            notes[i*blocksize + j] = sinf(2.0f*M_PI * j/44.1e3f * 440.0f*powf(a, i - 9));
-
-            // TODO What's the desirable voltage range here?
-            //      Transforming to 0-1.
-            notes[i*blocksize + j] = (notes[i*blocksize + j] + 1.0f) / 2.0f;
-
-        }
-    }
+    note_context_init(&nc, blocksize);
 
     while(1) {
 
@@ -83,46 +198,26 @@ int main(void) {
 
         DIGITAL_IO_SET(); // Use a scope on PD0 to measure execution time.
 
-        switch (state) {
-        
-        case 0:
-            first = 0;
-            third = 2;
-            fifth = 5;
-            break;
-
-        case 1:
-            first = 2;
-            third = 5;
-            fifth = 9;
-            break;
-
-        case 2:
-            first = 4;
-            third = 7:
-            fifth = 11;
-            break;
-
-        case 3:
-            first = 2;
-            third = 5;
-            fifth = 9;
-            break;
-
-        }
-
         for (i = 0; i < blocksize; i++) {
 
-            output1[i] = notes[first*blocksize + i]
-                       + notes[third*blocksize + i]
-                       + notes[fifth*blocksize + i];
-            output1[i] /= 3.0f;
+            //output1[i] = nc.buffer[chords[state][0]*blocksize + i]
+            //           + nc.buffer[chords[state][1]*blocksize + i]
+            //           + nc.buffer[chords[state][2]*blocksize + i];
+            //output1[i] /= 3;
+
+            note_context_sample_note(&nc, &notes[state], output1);
+            //note_context_sample_notes(&nc, chords[state], 3, output1);
 
         }
 
-        state = (state + 1) % 4;
-
         DIGITAL_IO_RESET();
+
+        block_count++;
+
+        state = ((int) (blocksize*block_count / 44.1e3f * 32.0f)) % 32;
+
+        sprintf(lcd_str, "%2d", state);
+        BSP_LCD_GLASS_DisplayString( (uint8_t *)lcd_str);
 
         putblockstereo(output1, output2);
 
@@ -136,10 +231,10 @@ int main(void) {
              * Don't be surprised when these cause a Sample Overrun error, 
              * depending on your sample rate.
              */
-            button_count++;
-            sprintf(lcd_str, "BTN %2d", button_count);
-            BSP_LCD_GLASS_DisplayString( (uint8_t *)lcd_str);
-            BSP_LED_Toggle(LED5);
+            //button_count++;
+            //sprintf(lcd_str, "BTN %2d", button_count);
+            //BSP_LCD_GLASS_DisplayString( (uint8_t *)lcd_str);
+            //BSP_LED_Toggle(LED5);
         }
     }
 }
