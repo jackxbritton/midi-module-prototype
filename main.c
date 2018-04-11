@@ -34,6 +34,10 @@ int main(void) {
           *output2;
     int button_count = 0;
     int i, j;
+    int state = 0;
+    int first,
+        third,
+        fifth;
 
     initialize_ece486(FS_44K1, MONO_IN, STEREO_OUT, MSI_INTERNAL_RC);
 
@@ -67,7 +71,7 @@ int main(void) {
             notes[i*blocksize + j] = sinf(2.0f*M_PI * j/44.1e3f * 440.0f*powf(a, i - 9));
 
             // TODO What's the desirable voltage range here?
-            //      The values in notes range from -1 to 1.
+            //      Transforming to 0-1.
             notes[i*blocksize + j] = (notes[i*blocksize + j] + 1.0f) / 2.0f;
 
         }
@@ -79,16 +83,44 @@ int main(void) {
 
         DIGITAL_IO_SET(); // Use a scope on PD0 to measure execution time.
 
-        // Test by outputting a C major chord.
+        switch (state) {
+        
+        case 0:
+            first = 0;
+            third = 2;
+            fifth = 5;
+            break;
+
+        case 1:
+            first = 2;
+            third = 5;
+            fifth = 9;
+            break;
+
+        case 2:
+            first = 4;
+            third = 7:
+            fifth = 11;
+            break;
+
+        case 3:
+            first = 2;
+            third = 5;
+            fifth = 9;
+            break;
+
+        }
 
         for (i = 0; i < blocksize; i++) {
 
-            output1[i] = notes[0*blocksize + i]
-                       + notes[2*blocksize + i]
-                       + notes[4*blocksize + i];
+            output1[i] = notes[first*blocksize + i]
+                       + notes[third*blocksize + i]
+                       + notes[fifth*blocksize + i];
             output1[i] /= 3.0f;
 
         }
+
+        state = (state + 1) % 4;
 
         DIGITAL_IO_RESET();
 
